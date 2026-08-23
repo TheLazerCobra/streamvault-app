@@ -81,6 +81,9 @@ var GENRES_TV = [
 var currentType    = 'all';
 var authMode       = 'signin'; // 'signin' | 'signup'
 var appStarted     = false;    // guards against re-running startup on token refresh
+var currentAccessToken = null; // kept in sync by onAuthStateChange — apiCall reads
+                                // this directly instead of awaiting getSession() on
+                                // every request (openDetail alone fires 4 in parallel)
 var _horrorKwId    = null; // cached TMDB keyword ID for "horror" — looked up once
 
 // Look up the TMDB keyword ID for "horror" and cache it.
@@ -126,6 +129,7 @@ var browseLoadingMore   = false;
 // INIT
 function init() {
   supabase.auth.onAuthStateChange(function(event, session) {
+    currentAccessToken = session ? session.access_token : null;
     if (session && !appStarted) {
       appStarted = true;
       loadProfileFromCloud().then(function() {
@@ -224,13 +228,10 @@ function apiCall(path, params) {
       url.searchParams.set(pk, params[pk]);
     });
   }
-  return supabase.auth.getSession().then(function(res) {
-    var session = res.data && res.data.session;
-    var token = session ? session.access_token : supabaseAnonKey;
-    return fetch(url.toString(), {
-      headers: { 'Authorization': 'Bearer ' + token, 'apikey': supabaseAnonKey, 'Accept': 'application/json' },
-      signal: AbortSignal.timeout(12000),
-    });
+  var token = currentAccessToken || supabaseAnonKey;
+  return fetch(url.toString(), {
+    headers: { 'Authorization': 'Bearer ' + token, 'apikey': supabaseAnonKey, 'Accept': 'application/json' },
+    signal: AbortSignal.timeout(12000),
   }).then(function(r) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
@@ -2613,16 +2614,15 @@ function openDetail(id, type) {
   modal.classList.add('open');
   inner.innerHTML = '<div style="padding:60px;text-align:center;color:var(--muted)"><div style="font-size:32px;margin-bottom:12px">\u29BB</div>Loading\u2026</div>';
 
-  Promise.all([
-    apiCall('/' + type + '/' + id, {language:'en-US'}),
-    apiCall('/' + type + '/' + id + '/credits', {language:'en-US'}),
-    apiCall('/' + type + '/' + id + '/watch/providers'),
-    apiCall('/' + type + '/' + id + '/recommendations', {language:'en-US', page:1}),
-  ]).then(function(results) {
-    var detail    = results[0];
-    var credits   = results[1];
-    var streaming = results[2];
-    var similar   = results[3];
+  // One request instead of four: TMDB's append_to_response embeds credits,
+  // watch/providers, and recommendations directly in the details payload,
+  // which matters more than usual here since every request now makes an
+  // extra hop through the tmdb-proxy Edge Function (browser -> proxy ->
+  // TMDB -> proxy -> browser) instead of going to TMDB directly.
+  apiCall('/' + type + '/' + id, {language:'en-US', append_to_response:'credits,watch/providers,recommendations'}).then(function(detail) {
+    var credits   = detail.credits || {};
+    var streaming = detail['watch/providers'] || {};
+    var similar   = detail.recommendations || {};
 
     var us = (streaming.results && streaming.results.US) ? streaming.results.US : {};
     var streamOpts  = (us.flatrate || []).concat(us.free || []);
