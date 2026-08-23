@@ -6,6 +6,12 @@ var IMGW    = 'https://image.tmdb.org/t/p/w500';
 var IMGBIG  = 'https://image.tmdb.org/t/p/w1280';
 var IMGFACE = 'https://image.tmdb.org/t/p/w185';
 var IMGLOGO = 'https://image.tmdb.org/t/p/w92';
+// Poster grid cards render at ~104-200px wide (see .poster-grid in
+// main.css); w500 has up to ~2x more pixels than that ever needs, which
+// means more bytes and more decode/raster cost per card, multiplied across
+// every card on screen — a real contributor to scroll jank in a grid full
+// of them. w342 is TMDB's closest standard size to that display width.
+var IMGCARD = 'https://image.tmdb.org/t/p/w342';
 
 var PLATFORMS = [
   // ── Special ──────────────────────────────────────────────────────────────
@@ -1563,7 +1569,7 @@ function buildProfileCard(entry, cardType, listId) {
   card.className = 'pcard';
 
   var posterHtml = entry.poster
-    ? '<img class="pimg" src="' + IMGW + entry.poster + '" alt="' + esc(entry.title) + '" loading="lazy">'
+    ? '<img class="pimg" src="' + IMGCARD + entry.poster + '" alt="' + esc(entry.title) + '" loading="lazy" decoding="async">'
     : '<div class="pplaceholder"><span class="ph-icon">\uD83C\uDFAC</span><span>' + esc(entry.title.substring(0,30)) + '</span></div>';
 
   var ratingHtml = (cardType === 'watched' && entry.rating)
@@ -2523,9 +2529,10 @@ function buildCard(item, type, platformIds) {
   if (item.poster_path) {
     var img = document.createElement('img');
     img.className = 'pimg';
-    img.src = IMGW + item.poster_path;
+    img.src = IMGCARD + item.poster_path;
     img.alt = title;
     img.loading = 'lazy';
+    img.decoding = 'async';
     img.onerror = function() {
       var ph = document.createElement('div');
       ph.className = 'pplaceholder';
