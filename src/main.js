@@ -1,6 +1,7 @@
 import './styles/main.css';
+import { supabase, supabaseUrl, supabaseAnonKey } from './api/supabase.js';
 
-var TMDB    = 'https://api.themoviedb.org/3';
+var TMDB_PROXY = supabaseUrl + '/functions/v1/tmdb-proxy';
 var IMGW    = 'https://image.tmdb.org/t/p/w500';
 var IMGBIG  = 'https://image.tmdb.org/t/p/w1280';
 var IMGFACE = 'https://image.tmdb.org/t/p/w185';
@@ -71,8 +72,9 @@ var GENRES_TV = [
   {id:10767,name:'Talk'},{id:10768,name:'War & Politics'},{id:37,name:'Western'},
 ];
 
-var API_KEY        = localStorage.getItem('tmdb_key') || '';
 var currentType    = 'all';
+var authMode       = 'signin'; // 'signin' | 'signup'
+var appStarted     = false;    // guards against re-running startup on token refresh
 var _horrorKwId    = null; // cached TMDB keyword ID for "horror" — looked up once
 
 // Look up the TMDB keyword ID for "horror" and cache it.
@@ -118,12 +120,20 @@ var browseLoadingMore   = false;
 // INIT
 function init() {
   loadProfile();
-  if (API_KEY) {
-    document.getElementById('keyGate').style.display = 'none';
-    buildPlatformBar();
-    buildGenreBar();
-    loadHome();
-  }
+  supabase.auth.onAuthStateChange(function(event, session) {
+    if (session && !appStarted) {
+      appStarted = true;
+      document.getElementById('authGate').style.display = 'none';
+      buildPlatformBar();
+      buildGenreBar();
+      loadHome();
+    } else if (!session) {
+      appStarted = false;
+      document.getElementById('authGate').style.display = 'flex';
+    }
+    // Any other combination (e.g. a background TOKEN_REFRESHED while the
+    // app is already running) intentionally leaves the current view alone.
+  });
   document.getElementById('searchInput').addEventListener('input', handleSearch);
   document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') {
@@ -138,55 +148,78 @@ function init() {
   });
 }
 
-// API KEY
-function submitKey() {
-  var input = document.getElementById('keyInput').value.trim();
-  var errEl = document.getElementById('keyError');
-  var btn   = document.getElementById('keyBtn');
-  if (!input) { errEl.textContent = 'Please paste your API Read Access Token.'; return; }
-  errEl.textContent = 'Checking...';
+// AUTH
+function toggleAuthMode() {
+  authMode = (authMode === 'signin') ? 'signup' : 'signin';
+  document.getElementById('authBtn').textContent = (authMode === 'signin') ? 'Sign In' : 'Sign Up';
+  document.getElementById('authToggle').innerHTML = (authMode === 'signin')
+    ? 'Don\u2019t have an account? <a href="#" onclick="toggleAuthMode();return false;">Sign up</a>'
+    : 'Already have an account? <a href="#" onclick="toggleAuthMode();return false;">Sign in</a>';
+  var errEl = document.getElementById('authError');
+  errEl.style.color = '';
+  errEl.textContent = '';
+}
+
+function submitAuth() {
+  var email    = document.getElementById('authEmail').value.trim();
+  var password = document.getElementById('authPassword').value;
+  var errEl    = document.getElementById('authError');
+  var btn      = document.getElementById('authBtn');
+  var restoreLabel = (authMode === 'signin') ? 'Sign In' : 'Sign Up';
+
+  errEl.style.color = '';
+  if (!email || !password) { errEl.textContent = 'Enter both email and password.'; return; }
+
+  errEl.textContent = '';
   btn.disabled = true;
-  btn.textContent = 'Checking...';
-  apiCall('/authentication', null, input).then(function(r) {
-    if (r.success) {
-      API_KEY = input;
-      localStorage.setItem('tmdb_key', API_KEY);
-      document.getElementById('keyGate').style.display = 'none';
-      buildPlatformBar();
-      buildGenreBar();
-      loadHome();
-    } else {
-      errEl.textContent = 'Invalid token. Make sure you copied the full API Read Access Token (the long one starting with ey...).';
+  btn.textContent = 'Please wait\u2026';
+
+  var action = (authMode === 'signin')
+    ? supabase.auth.signInWithPassword({ email: email, password: password })
+    : supabase.auth.signUp({ email: email, password: password });
+
+  action.then(function(res) {
+    if (res.error) {
+      errEl.textContent = res.error.message;
       btn.disabled = false;
-      btn.textContent = "Let's Go \u2192";
+      btn.textContent = restoreLabel;
+      return;
     }
+    if (authMode === 'signup' && !res.data.session) {
+      errEl.style.color = 'var(--gold)';
+      errEl.textContent = 'Check your email to confirm your account, then sign in.';
+      btn.disabled = false;
+      btn.textContent = restoreLabel;
+      return;
+    }
+    // onAuthStateChange (in init()) hides the gate and starts the app.
   }).catch(function(e) {
-    errEl.textContent = 'Could not connect. Check your token and internet connection. Error: ' + e.message;
+    errEl.textContent = 'Could not connect: ' + e.message;
     btn.disabled = false;
-    btn.textContent = "Let's Go \u2192";
+    btn.textContent = restoreLabel;
   });
 }
 
-function changeKey() {
-  document.getElementById('keyInput').value = API_KEY;
-  document.getElementById('keyError').textContent = '';
-  document.getElementById('keyBtn').disabled = false;
-  document.getElementById('keyBtn').textContent = "Let's Go \u2192";
-  document.getElementById('keyGate').style.display = 'flex';
+function signOutUser() {
+  supabase.auth.signOut();
 }
 
-// API HELPER
-function apiCall(path, params, key) {
-  var k = key || API_KEY;
-  var url = new URL(TMDB + path);
+// API HELPER \u2014 routes TMDB requests through the tmdb-proxy Edge Function,
+// which holds the real TMDB key server-side, so the browser never needs one.
+function apiCall(path, params) {
+  var url = new URL(TMDB_PROXY + path);
   if (params) {
     Object.keys(params).forEach(function(pk) {
       url.searchParams.set(pk, params[pk]);
     });
   }
-  return fetch(url.toString(), {
-    headers: { 'Authorization': 'Bearer ' + k, 'Accept': 'application/json' },
-    signal: AbortSignal.timeout(12000),
+  return supabase.auth.getSession().then(function(res) {
+    var session = res.data && res.data.session;
+    var token = session ? session.access_token : supabaseAnonKey;
+    return fetch(url.toString(), {
+      headers: { 'Authorization': 'Bearer ' + token, 'apikey': supabaseAnonKey, 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(12000),
+    });
   }).then(function(r) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
@@ -2734,7 +2767,6 @@ init();
 // those attributes call, by name, so the existing markup keeps working unchanged.
 window.applyProfileFilters = applyProfileFilters;
 window.applyYearFilter = applyYearFilter;
-window.changeKey = changeKey;
 window.clearSearch = clearSearch;
 window.closeListEditModal = closeListEditModal;
 window.closeListPicker = closeListPicker;
@@ -2767,9 +2799,11 @@ window.setSortOption = setSortOption;
 window.setType = setType;
 window.setVotesOption = setVotesOption;
 window.showListsOverview = showListsOverview;
-window.submitKey = submitKey;
+window.signOutUser = signOutUser;
+window.submitAuth = submitAuth;
 window.switchProfileTab = switchProfileTab;
 window.switchTab = switchTab;
+window.toggleAuthMode = toggleAuthMode;
 window.toggleDropdown = toggleDropdown;
 window.toggleListMembership = toggleListMembership;
 window.updateRangeLabel = updateRangeLabel;

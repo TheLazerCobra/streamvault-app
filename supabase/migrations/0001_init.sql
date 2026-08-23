@@ -2,6 +2,10 @@
 -- Matches the schema in the architecture roadmap. Every table a user's data
 -- lives in gets row-level security so the browser can talk to Postgres
 -- directly (via the Supabase client) without a custom API server.
+--
+-- Tables are created first, in dependency order; RLS policies come after,
+-- once every table they reference (e.g. lists policies referencing
+-- list_collaborators) actually exists.
 
 -- ── profiles ──────────────────────────────────────────────────────────────
 -- One row per account, created automatically when someone signs up.
@@ -13,18 +17,72 @@ create table public.profiles (
   created_at   timestamptz not null default now()
 );
 
-alter table public.profiles enable row level security;
+-- ── lists ─────────────────────────────────────────────────────────────────
+create table public.lists (
+  id          uuid primary key default gen_random_uuid(),
+  owner_id    uuid not null references public.profiles(id) on delete cascade,
+  name        text not null,
+  color       text not null default '#e8b84b',
+  is_public   boolean not null default false,
+  share_slug  text unique,
+  created_at  timestamptz not null default now()
+);
 
-create policy "profiles are publicly readable"
-  on public.profiles for select
-  using (true);
+-- ── list_items ────────────────────────────────────────────────────────────
+create table public.list_items (
+  id          uuid primary key default gen_random_uuid(),
+  list_id     uuid not null references public.lists(id) on delete cascade,
+  tmdb_id     integer not null,
+  media_type  text not null check (media_type in ('movie', 'tv')),
+  added_by    uuid not null references public.profiles(id),
+  added_at    timestamptz not null default now(),
+  unique (list_id, tmdb_id, media_type)
+);
 
-create policy "users can update their own profile"
-  on public.profiles for update
-  using (auth.uid() = id);
+-- ── list_collaborators ────────────────────────────────────────────────────
+create table public.list_collaborators (
+  list_id  uuid not null references public.lists(id) on delete cascade,
+  user_id  uuid not null references public.profiles(id) on delete cascade,
+  role     text not null check (role in ('viewer', 'editor')),
+  added_at timestamptz not null default now(),
+  primary key (list_id, user_id)
+);
 
--- Auto-create a profile row whenever a new auth user signs up. Username
--- defaults to the local part of their email, deduplicated if needed.
+-- ── watched ───────────────────────────────────────────────────────────────
+create table public.watched (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null references public.profiles(id) on delete cascade,
+  tmdb_id     integer not null,
+  media_type  text not null check (media_type in ('movie', 'tv')),
+  rating      numeric(3,1) check (rating between 0 and 10),
+  watched_at  timestamptz not null default now(),
+  unique (user_id, tmdb_id, media_type)
+);
+
+-- ── follows ───────────────────────────────────────────────────────────────
+create table public.follows (
+  follower_id uuid not null references public.profiles(id) on delete cascade,
+  followee_id uuid not null references public.profiles(id) on delete cascade,
+  created_at  timestamptz not null default now(),
+  primary key (follower_id, followee_id),
+  check (follower_id <> followee_id)
+);
+
+-- ── recommendations ───────────────────────────────────────────────────────
+create table public.recommendations (
+  id            uuid primary key default gen_random_uuid(),
+  from_user_id  uuid not null references public.profiles(id) on delete cascade,
+  to_user_id    uuid not null references public.profiles(id) on delete cascade,
+  tmdb_id       integer not null,
+  media_type    text not null check (media_type in ('movie', 'tv')),
+  note          text,
+  created_at    timestamptz not null default now(),
+  seen_at       timestamptz,
+  check (from_user_id <> to_user_id)
+);
+
+-- ── auto-create a profile on signup ──────────────────────────────────────
+-- Username defaults to the local part of their email, deduplicated if needed.
 create function public.handle_new_user()
 returns trigger
 language plpgsql
@@ -52,17 +110,22 @@ create trigger on_auth_user_created
   after insert on auth.users
   for each row execute function public.handle_new_user();
 
--- ── lists ─────────────────────────────────────────────────────────────────
-create table public.lists (
-  id          uuid primary key default gen_random_uuid(),
-  owner_id    uuid not null references public.profiles(id) on delete cascade,
-  name        text not null,
-  color       text not null default '#e8b84b',
-  is_public   boolean not null default false,
-  share_slug  text unique,
-  created_at  timestamptz not null default now()
-);
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Row-level security — every table above, now that all of them exist.
+-- ═══════════════════════════════════════════════════════════════════════════
 
+-- profiles
+alter table public.profiles enable row level security;
+
+create policy "profiles are publicly readable"
+  on public.profiles for select
+  using (true);
+
+create policy "users can update their own profile"
+  on public.profiles for update
+  using (auth.uid() = id);
+
+-- lists
 alter table public.lists enable row level security;
 
 create policy "owner has full access to their lists"
@@ -83,17 +146,7 @@ create policy "collaborators can read lists they're added to"
     )
   );
 
--- ── list_items ────────────────────────────────────────────────────────────
-create table public.list_items (
-  id          uuid primary key default gen_random_uuid(),
-  list_id     uuid not null references public.lists(id) on delete cascade,
-  tmdb_id     integer not null,
-  media_type  text not null check (media_type in ('movie', 'tv')),
-  added_by    uuid not null references public.profiles(id),
-  added_at    timestamptz not null default now(),
-  unique (list_id, tmdb_id, media_type)
-);
-
+-- list_items
 alter table public.list_items enable row level security;
 
 create policy "readable if the parent list is readable"
@@ -130,15 +183,7 @@ create policy "owner or editor collaborator can add/remove items"
   )
   with check (added_by = auth.uid());
 
--- ── list_collaborators ────────────────────────────────────────────────────
-create table public.list_collaborators (
-  list_id  uuid not null references public.lists(id) on delete cascade,
-  user_id  uuid not null references public.profiles(id) on delete cascade,
-  role     text not null check (role in ('viewer', 'editor')),
-  added_at timestamptz not null default now(),
-  primary key (list_id, user_id)
-);
-
+-- list_collaborators
 alter table public.list_collaborators enable row level security;
 
 create policy "list owner manages collaborators"
@@ -156,17 +201,7 @@ create policy "collaborators can see who else is on the list"
     select 1 from public.lists l where l.id = list_id and l.owner_id = auth.uid()
   ));
 
--- ── watched ───────────────────────────────────────────────────────────────
-create table public.watched (
-  id          uuid primary key default gen_random_uuid(),
-  user_id     uuid not null references public.profiles(id) on delete cascade,
-  tmdb_id     integer not null,
-  media_type  text not null check (media_type in ('movie', 'tv')),
-  rating      numeric(3,1) check (rating between 0 and 10),
-  watched_at  timestamptz not null default now(),
-  unique (user_id, tmdb_id, media_type)
-);
-
+-- watched
 alter table public.watched enable row level security;
 
 create policy "users manage their own watch history"
@@ -174,15 +209,7 @@ create policy "users manage their own watch history"
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
 
--- ── follows ───────────────────────────────────────────────────────────────
-create table public.follows (
-  follower_id uuid not null references public.profiles(id) on delete cascade,
-  followee_id uuid not null references public.profiles(id) on delete cascade,
-  created_at  timestamptz not null default now(),
-  primary key (follower_id, followee_id),
-  check (follower_id <> followee_id)
-);
-
+-- follows
 alter table public.follows enable row level security;
 
 create policy "follow graph is publicly readable"
@@ -197,19 +224,7 @@ create policy "users can unfollow"
   on public.follows for delete
   using (auth.uid() = follower_id);
 
--- ── recommendations ───────────────────────────────────────────────────────
-create table public.recommendations (
-  id            uuid primary key default gen_random_uuid(),
-  from_user_id  uuid not null references public.profiles(id) on delete cascade,
-  to_user_id    uuid not null references public.profiles(id) on delete cascade,
-  tmdb_id       integer not null,
-  media_type    text not null check (media_type in ('movie', 'tv')),
-  note          text,
-  created_at    timestamptz not null default now(),
-  seen_at       timestamptz,
-  check (from_user_id <> to_user_id)
-);
-
+-- recommendations
 alter table public.recommendations enable row level security;
 
 create policy "sender and recipient can read a recommendation"

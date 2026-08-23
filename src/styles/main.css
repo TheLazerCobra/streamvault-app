@@ -26,6 +26,9 @@ header{padding-left:calc(24px + env(safe-area-inset-left));padding-right:calc(24
 .key-btn:hover{background:#f0c860;transform:translateY(-1px)}
 .key-btn:disabled{opacity:.6;cursor:not-allowed;transform:none}
 .key-error{color:var(--red);font-size:12px;margin-top:8px;min-height:18px}
+.auth-toggle{font-size:13px;color:var(--soft);margin-top:18px}
+.auth-toggle a{color:var(--gold);text-decoration:none}
+.auth-toggle a:hover{text-decoration:underline}
 
 /* HEADER */
 header{position:sticky;top:0;z-index:100;background:rgba(13,13,15,.93);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);height:64px;display:flex;align-items:center;padding:0 24px;gap:16px}
