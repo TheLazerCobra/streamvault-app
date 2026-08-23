@@ -17,21 +17,21 @@
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,600;0,9..144,700;0,9..144,900;1,9..144,400&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 </head>
 <body>
-<div class="key-gate" id="keyGate">
+<div class="key-gate" id="authGate">
   <div class="key-card">
     <div class="key-logo">Stream<em>Vault</em></div>
-    <div class="key-tagline">Browse Netflix, Disney+, Prime, Peacock, Hulu, Apple TV+, Max &amp; Paramount+ — all in one place.</div>
-    <div class="key-steps">
-      <strong>Get your free TMDB API key:</strong><br>
-      1. Visit <a href="https://www.themoviedb.org/signup" target="_blank">themoviedb.org/signup</a> and create a free account<br>
-      2. Go to <a href="https://www.themoviedb.org/settings/api" target="_blank">Settings &rarr; API</a> and request a key (choose Developer)<br>
-      3. Copy the <strong>API Read Access Token</strong> (the long one starting with ey...) and paste below
-    </div>
+    <div class="key-tagline">Browse Netflix, Disney+, Prime, Peacock, Hulu, Apple TV+, Max &amp; Paramount+ — all in one place. Sign in to save lists and sync across devices.</div>
     <div class="key-row">
-      <input type="password" class="key-input" id="keyInput" placeholder="Paste your API Read Access Token…">
-      <button class="key-btn" id="keyBtn" onclick="submitKey()">Let's Go &rarr;</button>
+      <input type="email" class="key-input" id="authEmail" placeholder="Email" autocomplete="email">
     </div>
-    <div class="key-error" id="keyError"></div>
+    <div class="key-row" style="margin-top:10px">
+      <input type="password" class="key-input" id="authPassword" placeholder="Password" autocomplete="current-password">
+    </div>
+    <div class="key-row" style="margin-top:16px">
+      <button class="key-btn" id="authBtn" onclick="submitAuth()" style="flex:1">Sign In</button>
+    </div>
+    <div class="key-error" id="authError"></div>
+    <div class="auth-toggle" id="authToggle">Don't have an account? <a href="#" onclick="toggleAuthMode();return false;">Sign up</a></div>
   </div>
 </div>
 
@@ -47,7 +47,7 @@
     <button class="type-btn" onclick="setType('movie',this)">Movies</button>
     <button class="type-btn" onclick="setType('tv',this)"><span class="tv-label-full">TV Shows</span><span class="tv-label-short">TV</span></button>
   </div>
-  <button class="change-key-btn" onclick="changeKey()">&#9881;<span class="btn-label">&nbsp;API Key</span></button>
+  <button class="change-key-btn" onclick="signOutUser()">&#9881;<span class="btn-label">&nbsp;Sign Out</span></button>
   <button class="profile-btn" id="profileBtn" onclick="openProfile()">
     <div class="profile-avatar" id="profileAvatarSmall">?</div>
     <span id="profileBtnLabel">My Profile</span>

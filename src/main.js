@@ -1,10 +1,17 @@
 import './styles/main.css';
+import { supabase, supabaseUrl, supabaseAnonKey } from './api/supabase.js';
 
-var TMDB    = 'https://api.themoviedb.org/3';
+var TMDB_PROXY = supabaseUrl + '/functions/v1/tmdb-proxy';
 var IMGW    = 'https://image.tmdb.org/t/p/w500';
 var IMGBIG  = 'https://image.tmdb.org/t/p/w1280';
 var IMGFACE = 'https://image.tmdb.org/t/p/w185';
 var IMGLOGO = 'https://image.tmdb.org/t/p/w92';
+// Poster grid cards render at ~104-200px wide (see .poster-grid in
+// main.css); w500 has up to ~2x more pixels than that ever needs, which
+// means more bytes and more decode/raster cost per card, multiplied across
+// every card on screen — a real contributor to scroll jank in a grid full
+// of them. w342 is TMDB's closest standard size to that display width.
+var IMGCARD = 'https://image.tmdb.org/t/p/w342';
 
 var PLATFORMS = [
   // ── Special ──────────────────────────────────────────────────────────────
@@ -71,8 +78,12 @@ var GENRES_TV = [
   {id:10767,name:'Talk'},{id:10768,name:'War & Politics'},{id:37,name:'Western'},
 ];
 
-var API_KEY        = localStorage.getItem('tmdb_key') || '';
 var currentType    = 'all';
+var authMode       = 'signin'; // 'signin' | 'signup'
+var appStarted     = false;    // guards against re-running startup on token refresh
+var currentAccessToken = null; // kept in sync by onAuthStateChange — apiCall reads
+                                // this directly instead of awaiting getSession() on
+                                // every request (openDetail alone fires 4 in parallel)
 var _horrorKwId    = null; // cached TMDB keyword ID for "horror" — looked up once
 
 // Look up the TMDB keyword ID for "horror" and cache it.
@@ -117,13 +128,27 @@ var browseLoadingMore   = false;
 
 // INIT
 function init() {
-  loadProfile();
-  if (API_KEY) {
-    document.getElementById('keyGate').style.display = 'none';
-    buildPlatformBar();
-    buildGenreBar();
-    loadHome();
-  }
+  supabase.auth.onAuthStateChange(function(event, session) {
+    currentAccessToken = session ? session.access_token : null;
+    if (session && !appStarted) {
+      appStarted = true;
+      loadProfileFromCloud().then(function() {
+        document.getElementById('authGate').style.display = 'none';
+        buildPlatformBar();
+        buildGenreBar();
+        loadHome();
+      });
+    } else if (!session) {
+      appStarted = false;
+      currentUserId = null;
+      profile = { name: 'My Profile' };
+      watched = {};
+      lists = {};
+      document.getElementById('authGate').style.display = 'flex';
+    }
+    // Any other combination (e.g. a background TOKEN_REFRESHED while the
+    // app is already running) intentionally leaves the current view alone.
+  });
   document.getElementById('searchInput').addEventListener('input', handleSearch);
   document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') {
@@ -138,54 +163,74 @@ function init() {
   });
 }
 
-// API KEY
-function submitKey() {
-  var input = document.getElementById('keyInput').value.trim();
-  var errEl = document.getElementById('keyError');
-  var btn   = document.getElementById('keyBtn');
-  if (!input) { errEl.textContent = 'Please paste your API Read Access Token.'; return; }
-  errEl.textContent = 'Checking...';
+// AUTH
+function toggleAuthMode() {
+  authMode = (authMode === 'signin') ? 'signup' : 'signin';
+  document.getElementById('authBtn').textContent = (authMode === 'signin') ? 'Sign In' : 'Sign Up';
+  document.getElementById('authToggle').innerHTML = (authMode === 'signin')
+    ? 'Don\u2019t have an account? <a href="#" onclick="toggleAuthMode();return false;">Sign up</a>'
+    : 'Already have an account? <a href="#" onclick="toggleAuthMode();return false;">Sign in</a>';
+  var errEl = document.getElementById('authError');
+  errEl.style.color = '';
+  errEl.textContent = '';
+}
+
+function submitAuth() {
+  var email    = document.getElementById('authEmail').value.trim();
+  var password = document.getElementById('authPassword').value;
+  var errEl    = document.getElementById('authError');
+  var btn      = document.getElementById('authBtn');
+  var restoreLabel = (authMode === 'signin') ? 'Sign In' : 'Sign Up';
+
+  errEl.style.color = '';
+  if (!email || !password) { errEl.textContent = 'Enter both email and password.'; return; }
+
+  errEl.textContent = '';
   btn.disabled = true;
-  btn.textContent = 'Checking...';
-  apiCall('/authentication', null, input).then(function(r) {
-    if (r.success) {
-      API_KEY = input;
-      localStorage.setItem('tmdb_key', API_KEY);
-      document.getElementById('keyGate').style.display = 'none';
-      buildPlatformBar();
-      buildGenreBar();
-      loadHome();
-    } else {
-      errEl.textContent = 'Invalid token. Make sure you copied the full API Read Access Token (the long one starting with ey...).';
+  btn.textContent = 'Please wait\u2026';
+
+  var action = (authMode === 'signin')
+    ? supabase.auth.signInWithPassword({ email: email, password: password })
+    : supabase.auth.signUp({ email: email, password: password });
+
+  action.then(function(res) {
+    if (res.error) {
+      errEl.textContent = res.error.message;
       btn.disabled = false;
-      btn.textContent = "Let's Go \u2192";
+      btn.textContent = restoreLabel;
+      return;
     }
+    if (authMode === 'signup' && !res.data.session) {
+      errEl.style.color = 'var(--gold)';
+      errEl.textContent = 'Check your email to confirm your account, then sign in.';
+      btn.disabled = false;
+      btn.textContent = restoreLabel;
+      return;
+    }
+    // onAuthStateChange (in init()) hides the gate and starts the app.
   }).catch(function(e) {
-    errEl.textContent = 'Could not connect. Check your token and internet connection. Error: ' + e.message;
+    errEl.textContent = 'Could not connect: ' + e.message;
     btn.disabled = false;
-    btn.textContent = "Let's Go \u2192";
+    btn.textContent = restoreLabel;
   });
 }
 
-function changeKey() {
-  document.getElementById('keyInput').value = API_KEY;
-  document.getElementById('keyError').textContent = '';
-  document.getElementById('keyBtn').disabled = false;
-  document.getElementById('keyBtn').textContent = "Let's Go \u2192";
-  document.getElementById('keyGate').style.display = 'flex';
+function signOutUser() {
+  supabase.auth.signOut();
 }
 
-// API HELPER
-function apiCall(path, params, key) {
-  var k = key || API_KEY;
-  var url = new URL(TMDB + path);
+// API HELPER \u2014 routes TMDB requests through the tmdb-proxy Edge Function,
+// which holds the real TMDB key server-side, so the browser never needs one.
+function apiCall(path, params) {
+  var url = new URL(TMDB_PROXY + path);
   if (params) {
     Object.keys(params).forEach(function(pk) {
       url.searchParams.set(pk, params[pk]);
     });
   }
+  var token = currentAccessToken || supabaseAnonKey;
   return fetch(url.toString(), {
-    headers: { 'Authorization': 'Bearer ' + k, 'Accept': 'application/json' },
+    headers: { 'Authorization': 'Bearer ' + token, 'apikey': supabaseAnonKey, 'Accept': 'application/json' },
     signal: AbortSignal.timeout(12000),
   }).then(function(r) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -784,13 +829,12 @@ function loadAllPlatformsGenre(genreId, typeFilter, page) {
 
 
 // ─── PROFILE SYSTEM ──────────────────────────────────────────────────────────
-// Storage keys
-var PROFILE_KEY   = 'sv_profile';
-var WATCHED_KEY   = 'sv_watched';
-var LISTS_KEY     = 'sv_lists';
-
-// In-memory state
+// In-memory state — populated from Postgres (loadProfileFromCloud, called
+// on sign-in) and kept in sync with it. Every mutation below updates these
+// objects immediately for a snappy UI, then writes through to Supabase in
+// the background; a failed write shows a toast and reverts the local change.
 var profile       = { name: 'My Profile' };
+var currentUserId = null; // set by loadProfileFromCloud once signed in
 var watched       = {};   // key -> { id, type, title, poster, year, rating, note, genreIds, tmdbScore, addedAt }
 var lists         = {};   // listId -> { id, name, color, items: { key -> listItem } }
 var activeProfileTab   = 'lists';
@@ -807,39 +851,72 @@ var pendingEditListId  = null;   // null = creating new, string = editing existi
 var pendingEditColor   = LIST_COLORS[0];
 var pendingPickerAfterCreate = false; // re-open picker after creating list
 
-// ── Storage ───────────────────────────────────────────────────────────────────
-function loadProfile() {
-  try { var p = localStorage.getItem(PROFILE_KEY); if (p) profile = JSON.parse(p); } catch(e) {}
-  try { var w = localStorage.getItem(WATCHED_KEY); if (w) watched = JSON.parse(w); } catch(e) {}
-  try {
-    var l = localStorage.getItem(LISTS_KEY);
-    if (l) {
-      lists = JSON.parse(l);
-    } else {
-      // Migrate old watchlist if it exists
-      var oldWl = localStorage.getItem('sv_watchlist');
-      if (oldWl) {
-        var oldItems = JSON.parse(oldWl);
-        var defId = 'list_default';
-        lists[defId] = {id:defId, name:'Want to Watch', color:'#e8b84b', items: oldItems};
-      }
-    }
-    // Always ensure a default list exists
-    if (!Object.keys(lists).length) {
-      var defId2 = 'list_default';
-      lists[defId2] = {id:defId2, name:'Want to Watch', color:'#e8b84b', items:{}};
-    }
-  } catch(e) {
-    var defId3 = 'list_default';
-    lists[defId3] = {id:defId3, name:'Want to Watch', color:'#e8b84b', items:{}};
-  }
-  updateProfileButton();
+// ── Cloud sync ───────────────────────────────────────────────────────────────
+// listId -> Promise, present while that list's INSERT is still in flight, so
+// an item added to a brand-new list doesn't race the list's own creation.
+var pendingListCreates = {};
+
+function afterListReady(listId, fn) {
+  var pending = pendingListCreates[listId];
+  return pending ? pending.then(fn) : fn();
 }
 
-function saveProfileStorage() {
-  try { localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));   } catch(e) {}
-  try { localStorage.setItem(WATCHED_KEY, JSON.stringify(watched));   } catch(e) {}
-  try { localStorage.setItem(LISTS_KEY,   JSON.stringify(lists));     } catch(e) {}
+function dbToListItem(row) {
+  return {
+    id: row.tmdb_id, type: row.media_type,
+    title: row.title, poster: row.poster_path, year: row.year,
+    seasons: row.seasons, genreIds: row.genre_ids || [],
+    tmdbScore: row.tmdb_score,
+    addedAt: row.added_at ? new Date(row.added_at).getTime() : Date.now(),
+  };
+}
+
+// Called once, right after sign-in — replaces the placeholder in-memory
+// state with the signed-in user's real data from Postgres.
+function loadProfileFromCloud() {
+  return supabase.auth.getUser().then(function(userRes) {
+    var user = userRes.data && userRes.data.user;
+    if (!user) return;
+    currentUserId = user.id;
+    return Promise.all([
+      supabase.from('profiles').select('display_name').eq('id', user.id).maybeSingle(),
+      supabase.from('lists').select('id,name,color,list_items(tmdb_id,media_type,title,poster_path,year,seasons,genre_ids,tmdb_score,added_at)').eq('owner_id', user.id),
+      supabase.from('watched').select('tmdb_id,media_type,title,poster_path,year,seasons,genre_ids,tmdb_score,rating,note,watched_at').eq('user_id', user.id),
+    ]);
+  }).then(function(results) {
+    if (!results) return;
+    var profileRes = results[0], listsRes = results[1], watchedRes = results[2];
+    if (profileRes.error || listsRes.error || watchedRes.error) {
+      throw (profileRes.error || listsRes.error || watchedRes.error);
+    }
+
+    profile.name = (profileRes.data && profileRes.data.display_name) || 'My Profile';
+
+    lists = {};
+    (listsRes.data || []).forEach(function(l) {
+      var items = {};
+      (l.list_items || []).forEach(function(li) {
+        items[getItemKey(li.tmdb_id, li.media_type)] = dbToListItem(li);
+      });
+      lists[l.id] = { id: l.id, name: l.name, color: l.color, items: items };
+    });
+
+    watched = {};
+    (watchedRes.data || []).forEach(function(w) {
+      var entry = dbToListItem(w);
+      entry.rating    = w.rating || 0;
+      entry.note      = w.note || '';
+      entry.watchedAt = w.watched_at ? new Date(w.watched_at).getTime() : Date.now();
+      watched[getItemKey(w.tmdb_id, w.media_type)] = entry;
+    });
+
+    // First time this account has been seen — mirror the app's old default.
+    if (!Object.keys(lists).length) createList('Want to Watch', '#e8b84b');
+
+    updateProfileButton();
+  }).catch(function(e) {
+    showToast('Could not load your profile: ' + e.message);
+  });
 }
 
 function getItemKey(id, type) { return type + '_' + id; }
@@ -863,52 +940,108 @@ function makeListItem(item, type) {
   };
 }
 
-// ── List CRUD ─────────────────────────────────────────────────────────────────
+// ── List CRUD ─────────────────────────────────────────────────────────────────────
 function createList(name, color) {
-  var id = 'list_' + Date.now();
-  lists[id] = {id:id, name:name || 'New List', color:color || LIST_COLORS[0], items:{}};
-  saveProfileStorage();
+  var id = crypto.randomUUID();
+  var row = {id:id, name:name || 'New List', color:color || LIST_COLORS[0], items:{}};
+  lists[id] = row;
+
+  pendingListCreates[id] = supabase.from('lists').insert({
+    id: id, name: row.name, color: row.color,
+  }).then(function(res) {
+    delete pendingListCreates[id];
+    if (res.error) {
+      showToast('Could not save list: ' + res.error.message);
+      delete lists[id];
+      refreshProfileIfOpen();
+    }
+  });
+
   return id;
 }
 
 function renameList(listId, name, color) {
   if (!lists[listId]) return;
+  var prevName = lists[listId].name, prevColor = lists[listId].color;
   lists[listId].name  = name  || lists[listId].name;
   lists[listId].color = color || lists[listId].color;
-  saveProfileStorage();
+
+  afterListReady(listId, function() {
+    return supabase.from('lists').update({ name: lists[listId].name, color: lists[listId].color }).eq('id', listId);
+  }).then(function(res) {
+    if (res && res.error) {
+      showToast('Could not rename list: ' + res.error.message);
+      if (lists[listId]) { lists[listId].name = prevName; lists[listId].color = prevColor; refreshProfileIfOpen(); }
+    }
+  });
 }
 
 function deleteList(listId) {
+  var removed = lists[listId];
   delete lists[listId];
-  saveProfileStorage();
   if (activeListId === listId) { activeListId = null; }
   refreshProfileIfOpen();
+
+  afterListReady(listId, function() {
+    return supabase.from('lists').delete().eq('id', listId);
+  }).then(function(res) {
+    if (res && res.error) {
+      showToast('Could not delete list: ' + res.error.message);
+      if (removed) { lists[listId] = removed; refreshProfileIfOpen(); }
+    }
+  });
 }
 
 function addToList(listId, item, type) {
   if (!lists[listId]) return;
   var key = getItemKey(item.id, type);
-  lists[listId].items[key] = makeListItem(item, type);
-  saveProfileStorage();
+  var entry = makeListItem(item, type);
+  lists[listId].items[key] = entry;
   refreshModalButtons(item.id, type);
   refreshProfileIfOpen();
   showToast('\u2B50 Added to \u201C' + lists[listId].name + '\u201D');
+
+  afterListReady(listId, function() {
+    return supabase.from('list_items').upsert({
+      list_id: listId, tmdb_id: item.id, media_type: type,
+      title: entry.title, poster_path: entry.poster, year: entry.year,
+      seasons: entry.seasons, genre_ids: entry.genreIds, tmdb_score: entry.tmdbScore,
+    }, { onConflict: 'list_id,tmdb_id,media_type' });
+  }).then(function(res) {
+    if (res && res.error) {
+      showToast('Could not save to list: ' + res.error.message);
+      if (lists[listId]) { delete lists[listId].items[key]; refreshModalButtons(item.id, type); refreshProfileIfOpen(); }
+    }
+  });
 }
 
 function removeFromList(listId, id, type) {
   if (!lists[listId]) return;
-  delete lists[listId].items[getItemKey(id, type)];
-  saveProfileStorage();
+  var key = getItemKey(id, type);
+  var removed = lists[listId].items[key];
+  delete lists[listId].items[key];
   refreshModalButtons(id, type);
   refreshProfileIfOpen();
+
+  afterListReady(listId, function() {
+    return supabase.from('list_items').delete().eq('list_id', listId).eq('tmdb_id', id).eq('media_type', type);
+  }).then(function(res) {
+    if (res && res.error) {
+      showToast('Could not remove from list: ' + res.error.message);
+      if (lists[listId] && removed) { lists[listId].items[key] = removed; refreshModalButtons(id, type); refreshProfileIfOpen(); }
+    }
+  });
 }
 
 function removeFromAllLists(id, type) {
   var key = getItemKey(id, type);
   Object.values(lists).forEach(function(l) { delete l.items[key]; });
-  saveProfileStorage();
   refreshModalButtons(id, type);
   refreshProfileIfOpen();
+
+  supabase.from('list_items').delete().eq('tmdb_id', id).eq('media_type', type).then(function(res) {
+    if (res && res.error) showToast('Could not remove from lists: ' + res.error.message);
+  });
 }
 
 function listCountForItem(id, type) {
@@ -916,26 +1049,47 @@ function listCountForItem(id, type) {
   return Object.values(lists).filter(function(l) { return !!l.items[key]; }).length;
 }
 
-// ── Watched (unchanged) ───────────────────────────────────────────────────────
+// ── Watched ───────────────────────────────────────────────────────────────────
 function addToWatched(item, type, rating, note) {
   if (isInAnyList(item.id, type)) removeFromAllLists(item.id, type);
+  var key = getItemKey(item.id, type);
   var entry = makeListItem(item, type);
   entry.rating    = rating || 0;
   entry.note      = note   || '';
   entry.watchedAt = Date.now();
-  watched[getItemKey(item.id, type)] = entry;
-  saveProfileStorage();
+  watched[key] = entry;
   refreshModalButtons(item.id, type);
   refreshProfileIfOpen();
   showToast('\u2714 Marked as Watched' + (rating ? ' \u2014 ' + rating + '\u2605' : ''));
+
+  supabase.from('watched').upsert({
+    tmdb_id: item.id, media_type: type, rating: entry.rating || null, note: entry.note || null,
+    title: entry.title, poster_path: entry.poster, year: entry.year,
+    seasons: entry.seasons, genre_ids: entry.genreIds, tmdb_score: entry.tmdbScore,
+  }, { onConflict: 'user_id,tmdb_id,media_type' }).then(function(res) {
+    if (res.error) {
+      showToast('Could not save watch history: ' + res.error.message);
+      delete watched[key];
+      refreshModalButtons(item.id, type);
+      refreshProfileIfOpen();
+    }
+  });
 }
 
 function removeFromWatched(id, type) {
-  delete watched[getItemKey(id, type)];
-  saveProfileStorage();
+  var key = getItemKey(id, type);
+  var removed = watched[key];
+  delete watched[key];
   refreshModalButtons(id, type);
   refreshProfileIfOpen();
   showToast('Removed from Watched');
+
+  supabase.from('watched').delete().eq('tmdb_id', id).eq('media_type', type).then(function(res) {
+    if (res.error) {
+      showToast('Could not remove from watch history: ' + res.error.message);
+      if (removed) { watched[key] = removed; refreshModalButtons(id, type); refreshProfileIfOpen(); }
+    }
+  });
 }
 
 // ── List picker modal ─────────────────────────────────────────────────────────
@@ -1101,7 +1255,20 @@ function editProfileName() {
 
 function saveProfileName() {
   var val = (document.getElementById('profileNameInput').value || '').trim();
-  if (val) { profile.name = val; saveProfileStorage(); renderProfileHeader(); updateProfileButton(); }
+  if (val) {
+    var prev = profile.name;
+    profile.name = val;
+    renderProfileHeader();
+    updateProfileButton();
+    supabase.from('profiles').update({ display_name: val }).eq('id', currentUserId).then(function(res) {
+      if (res.error) {
+        showToast('Could not save name: ' + res.error.message);
+        profile.name = prev;
+        renderProfileHeader();
+        updateProfileButton();
+      }
+    });
+  }
   document.getElementById('profileNameDisplay').style.display = 'block';
   document.getElementById('profileNameEdit').style.display = 'none';
 }
@@ -1403,7 +1570,7 @@ function buildProfileCard(entry, cardType, listId) {
   card.className = 'pcard';
 
   var posterHtml = entry.poster
-    ? '<img class="pimg" src="' + IMGW + entry.poster + '" alt="' + esc(entry.title) + '" loading="lazy">'
+    ? '<img class="pimg" src="' + IMGCARD + entry.poster + '" alt="' + esc(entry.title) + '" loading="lazy" decoding="async">'
     : '<div class="pplaceholder"><span class="ph-icon">\uD83C\uDFAC</span><span>' + esc(entry.title.substring(0,30)) + '</span></div>';
 
   var ratingHtml = (cardType === 'watched' && entry.rating)
@@ -2363,9 +2530,10 @@ function buildCard(item, type, platformIds) {
   if (item.poster_path) {
     var img = document.createElement('img');
     img.className = 'pimg';
-    img.src = IMGW + item.poster_path;
+    img.src = IMGCARD + item.poster_path;
     img.alt = title;
     img.loading = 'lazy';
+    img.decoding = 'async';
     img.onerror = function() {
       var ph = document.createElement('div');
       ph.className = 'pplaceholder';
@@ -2446,16 +2614,15 @@ function openDetail(id, type) {
   modal.classList.add('open');
   inner.innerHTML = '<div style="padding:60px;text-align:center;color:var(--muted)"><div style="font-size:32px;margin-bottom:12px">\u29BB</div>Loading\u2026</div>';
 
-  Promise.all([
-    apiCall('/' + type + '/' + id, {language:'en-US'}),
-    apiCall('/' + type + '/' + id + '/credits', {language:'en-US'}),
-    apiCall('/' + type + '/' + id + '/watch/providers'),
-    apiCall('/' + type + '/' + id + '/recommendations', {language:'en-US', page:1}),
-  ]).then(function(results) {
-    var detail    = results[0];
-    var credits   = results[1];
-    var streaming = results[2];
-    var similar   = results[3];
+  // One request instead of four: TMDB's append_to_response embeds credits,
+  // watch/providers, and recommendations directly in the details payload,
+  // which matters more than usual here since every request now makes an
+  // extra hop through the tmdb-proxy Edge Function (browser -> proxy ->
+  // TMDB -> proxy -> browser) instead of going to TMDB directly.
+  apiCall('/' + type + '/' + id, {language:'en-US', append_to_response:'credits,watch/providers,recommendations'}).then(function(detail) {
+    var credits   = detail.credits || {};
+    var streaming = detail['watch/providers'] || {};
+    var similar   = detail.recommendations || {};
 
     var us = (streaming.results && streaming.results.US) ? streaming.results.US : {};
     var streamOpts  = (us.flatrate || []).concat(us.free || []);
@@ -2734,7 +2901,6 @@ init();
 // those attributes call, by name, so the existing markup keeps working unchanged.
 window.applyProfileFilters = applyProfileFilters;
 window.applyYearFilter = applyYearFilter;
-window.changeKey = changeKey;
 window.clearSearch = clearSearch;
 window.closeListEditModal = closeListEditModal;
 window.closeListPicker = closeListPicker;
@@ -2767,9 +2933,11 @@ window.setSortOption = setSortOption;
 window.setType = setType;
 window.setVotesOption = setVotesOption;
 window.showListsOverview = showListsOverview;
-window.submitKey = submitKey;
+window.signOutUser = signOutUser;
+window.submitAuth = submitAuth;
 window.switchProfileTab = switchProfileTab;
 window.switchTab = switchTab;
+window.toggleAuthMode = toggleAuthMode;
 window.toggleDropdown = toggleDropdown;
 window.toggleListMembership = toggleListMembership;
 window.updateRangeLabel = updateRangeLabel;
