@@ -846,7 +846,7 @@ function getHorrorKeywordId() {
     return _horrorKwId;
   });
 }
-var activePlatform = 'all';
+var activePlatform = []; // array of selected provider ids; empty = "All"
 var activeGenre    = null;
 var searchQuery    = '';
 var searchTimer    = null;
@@ -866,7 +866,7 @@ var filters = {
 var browseCurrentPage   = 1;
 var browseCurrentGenre  = null;
 var browseCurrentType   = 'all';
-var browseCurrentPlatform = 'all';
+var browseCurrentPlatform = []; // array of selected provider ids; empty = "All"
 var browseLoadingMore   = false;
 
 // INIT
@@ -967,18 +967,23 @@ function buildPlatformBar() {
 }
 
 function selectPlatform(id) {
-  activePlatform = id;
+  if (id === 'all') {
+    activePlatform = [];
+  } else {
+    var idx = activePlatform.indexOf(id);
+    if (idx === -1) activePlatform.push(id); else activePlatform.splice(idx, 1);
+  }
   activeGenre = null;
   document.querySelectorAll('.platform-chip').forEach(function(c) {
     var pid = c.dataset.pid;
     var cid = pid === 'all' ? 'all' : parseInt(pid);
-    var active = (String(cid) === String(id));
+    var active = (cid === 'all') ? (activePlatform.length === 0) : (activePlatform.indexOf(cid) !== -1);
     c.classList.toggle('active', active);
     if (active) {
-      var p = findPlatform(id);
+      var p = findPlatform(cid);
       if (p) {
-        c.style.background  = p.color + (id === 'all' ? '1a' : '22');
-        c.style.borderColor = p.color + (id === 'all' ? '66' : '77');
+        c.style.background  = p.color + (cid === 'all' ? '1a' : '22');
+        c.style.borderColor = p.color + (cid === 'all' ? '66' : '77');
         c.style.color       = p.color;
       }
     } else {
@@ -986,8 +991,8 @@ function selectPlatform(id) {
     }
   });
   buildGenreBar();
-  if (id === 'all') loadHome();
-  else loadPlatformBrowse(id);
+  if (activePlatform.length === 0) loadHome();
+  else loadPlatformBrowse(activePlatform);
 }
 
 // ── Per-section Load More button helper ───────────────────────────────────────
@@ -1038,14 +1043,14 @@ function selectGenre(id, btn) {
   activeGenre = id;
   document.querySelectorAll('.genre-pill').forEach(function(p) { p.classList.remove('active'); });
   btn.classList.add('active');
-  if (activePlatform !== 'all') loadPlatformBrowse(activePlatform);
+  if (activePlatform.length > 0) loadPlatformBrowse(activePlatform);
   else if (id) loadAllPlatformsGenre(id, currentType);
   else loadHome();
 }
 
 // HOME
 function loadHome() {
-  browseCurrentPlatform = 'all';
+  browseCurrentPlatform = [];
   browseCurrentGenre    = null;
   browseCurrentType     = currentType;
   loadAllPlatformsBrowse(1);
@@ -1054,7 +1059,7 @@ function loadHome() {
 // All Platforms, no genre filter — filterable, sortable, paginated
 function loadAllPlatformsBrowse(page) {
   page = page || 1;
-  browseCurrentPlatform = 'all';
+  browseCurrentPlatform = [];
   browseCurrentGenre    = null;
   browseCurrentType     = currentType;
 
@@ -1142,20 +1147,22 @@ function loadAllPlatformsBrowse(page) {
 }
 
 // PLATFORM BROWSE
-function loadPlatformBrowse(platformId, page) {
+// platformIds: array of selected provider ids (one or more). Multiple platforms
+// are combined with OR logic — a title matches if it's available on ANY of them.
+function loadPlatformBrowse(platformIds, page) {
   page = page || 1;
-  browseCurrentPlatform = platformId;
+  browseCurrentPlatform = platformIds;
   browseCurrentGenre    = activeGenre;
   browseCurrentType     = currentType;
 
-  var main     = document.getElementById('main');
-  var platform = findPlatform(platformId);
-  var lbl      = platform ? platform.label : '';
+  var main        = document.getElementById('main');
+  var providerStr = platformIds.join('|');
+  var lbl         = platformIds.map(function(id) { var p = findPlatform(id); return p ? p.label : ''; }).filter(Boolean).join(' + ');
 
   if (page === 1) { main.innerHTML = skelShelves(2); showFilterBar(true); }
 
-  var extraMovie = { with_watch_providers: platformId, page: page };
-  var extraTv    = { with_watch_providers: platformId, page: page };
+  var extraMovie = { with_watch_providers: providerStr, page: page };
+  var extraTv    = { with_watch_providers: providerStr, page: page };
   if (activeGenre) { extraMovie.with_genres = resolveGenreId(activeGenre, 'movie'); extraTv.with_genres = resolveGenreId(activeGenre, 'tv'); }
 
   // Horror TV: TMDB does not have genre 27 for TV in its official list.
@@ -1173,7 +1180,7 @@ function loadPlatformBrowse(platformId, page) {
           language: 'en-US', watch_region: 'US',
           with_keywords: kwId,
           sort_by: 'vote_count.desc',
-          with_watch_providers: String(platformId),
+          with_watch_providers: providerStr,
           page: page
         });
       })
@@ -1183,8 +1190,8 @@ function loadPlatformBrowse(platformId, page) {
 
   Promise.all([movieP, tvP]).then(function(results) {
     var md = results[0]; var td = results[1];
-    var movies = md ? clientSideSort(md.results.map(function(i){return Object.assign({},i,{_pids:[platformId]});}), 'movie') : [];
-    var shows  = td ? clientSideSort(td.results.map(function(i){return Object.assign({},i,{_pids:[platformId]});}), 'tv') : [];
+    var rawMovies = md ? clientSideSort(md.results, 'movie') : [];
+    var rawShows  = td ? clientSideSort(td.results, 'tv')    : [];
     var totalMp = md ? md.total_pages   : 0; var totalTp = td ? td.total_pages   : 0;
     var totalMr = md ? md.total_results : 0; var totalTr = td ? td.total_results : 0;
 
@@ -1192,40 +1199,64 @@ function loadPlatformBrowse(platformId, page) {
       main.innerHTML = '';
       showFilterBar(true);
       main.appendChild(makeHeader(lbl, activeGenre ? 'filtered by genre' : 'full catalog'));
-      if (!movies.length && !shows.length) { main.innerHTML += emptyHTML('Nothing found', 'Try adjusting your filters.'); return; }
+      if (!rawMovies.length && !rawShows.length) { main.innerHTML += emptyHTML('Nothing found', 'Try adjusting your filters.'); return; }
     }
 
-    // ── Movies section ──────────────────────────────────────────────────────
-    if (movies.length) {
-      var omLM = document.getElementById('lm-movies'); if (omLM) omLM.parentNode.removeChild(omLM);
-      if (page === 1) {
-        var cb = document.createElement('div'); cb.className = 'result-count-bar';
-        cb.textContent = totalMr.toLocaleString() + ' movies'; main.appendChild(cb);
-      }
-      appendToGrid(main, 'movies-grid', '\uD83C\uDFAC Movies', movies, 'movie');
-      if (page < totalMp) {
-        var mGrid = document.getElementById('movies-grid'); var mp = page;
-        var mBtn = makeSectionLoadMoreBtn('Load More Movies', 'lm-movies', function() { loadPlatformBrowse(platformId, mp + 1); });
-        if (mGrid && mGrid.parentNode) mGrid.parentNode.insertBefore(mBtn, mGrid.nextSibling);
-        else main.appendChild(mBtn);
-      }
+    // With one platform selected, the discover query already guarantees the
+    // result set, so badges can be tagged directly. With several platforms
+    // (OR logic), verify per-item which of the selected ones actually carry
+    // it so badges stay accurate instead of showing every selected platform.
+    var multi = platformIds.length > 1;
+    var statusEl = null;
+    if (multi && (rawMovies.length || rawShows.length)) {
+      statusEl = document.createElement('div'); statusEl.className = 'status-bar'; statusEl.id = 'pstatus';
+      statusEl.innerHTML = '<span class="spinning">↻</span> Checking streaming availability…';
+      main.appendChild(statusEl);
     }
 
-    // ── TV section ──────────────────────────────────────────────────────────
-    if (shows.length) {
-      var otLM = document.getElementById('lm-shows'); if (otLM) otLM.parentNode.removeChild(otLM);
-      if (page === 1) {
-        var cb2 = document.createElement('div'); cb2.className = 'result-count-bar'; cb2.style.marginTop = '24px';
-        cb2.textContent = totalTr.toLocaleString() + ' TV shows'; main.appendChild(cb2);
+    var mReady = multi
+      ? (rawMovies.length ? enrichWithProviders(rawMovies, 'movie', platformIds, false) : Promise.resolve([]))
+      : Promise.resolve(rawMovies.map(function(i) { return Object.assign({}, i, {_pids: platformIds}); }));
+    var tReady = multi
+      ? (rawShows.length ? enrichWithProviders(rawShows, 'tv', platformIds, false) : Promise.resolve([]))
+      : Promise.resolve(rawShows.map(function(i) { return Object.assign({}, i, {_pids: platformIds}); }));
+
+    Promise.all([mReady, tReady]).then(function(ready) {
+      if (statusEl) statusEl.remove();
+      var movies = ready[0]; var shows = ready[1];
+
+      // ── Movies section ──────────────────────────────────────────────────────
+      if (movies.length) {
+        var omLM = document.getElementById('lm-movies'); if (omLM) omLM.parentNode.removeChild(omLM);
+        if (page === 1) {
+          var cb = document.createElement('div'); cb.className = 'result-count-bar';
+          cb.textContent = totalMr.toLocaleString() + ' movies'; main.appendChild(cb);
+        }
+        appendToGrid(main, 'movies-grid', '\uD83C\uDFAC Movies', movies, 'movie');
+        if (page < totalMp) {
+          var mGrid = document.getElementById('movies-grid'); var mp = page;
+          var mBtn = makeSectionLoadMoreBtn('Load More Movies', 'lm-movies', function() { loadPlatformBrowse(platformIds, mp + 1); });
+          if (mGrid && mGrid.parentNode) mGrid.parentNode.insertBefore(mBtn, mGrid.nextSibling);
+          else main.appendChild(mBtn);
+        }
       }
-      appendToGrid(main, 'shows-grid', '\uD83D\uDCFA TV Shows', shows, 'tv');
-      if (page < totalTp) {
-        var tGrid = document.getElementById('shows-grid'); var tp = page;
-        var tBtn = makeSectionLoadMoreBtn('Load More TV Shows', 'lm-shows', function() { loadPlatformBrowse(platformId, tp + 1); });
-        if (tGrid && tGrid.parentNode) tGrid.parentNode.insertBefore(tBtn, tGrid.nextSibling);
-        else main.appendChild(tBtn);
+
+      // ── TV section ──────────────────────────────────────────────────────────
+      if (shows.length) {
+        var otLM = document.getElementById('lm-shows'); if (otLM) otLM.parentNode.removeChild(otLM);
+        if (page === 1) {
+          var cb2 = document.createElement('div'); cb2.className = 'result-count-bar'; cb2.style.marginTop = '24px';
+          cb2.textContent = totalTr.toLocaleString() + ' TV shows'; main.appendChild(cb2);
+        }
+        appendToGrid(main, 'shows-grid', '\uD83D\uDCFA TV Shows', shows, 'tv');
+        if (page < totalTp) {
+          var tGrid = document.getElementById('shows-grid'); var tp = page;
+          var tBtn = makeSectionLoadMoreBtn('Load More TV Shows', 'lm-shows', function() { loadPlatformBrowse(platformIds, tp + 1); });
+          if (tGrid && tGrid.parentNode) tGrid.parentNode.insertBefore(tBtn, tGrid.nextSibling);
+          else main.appendChild(tBtn);
+        }
       }
-    }
+    });
   }).catch(function(e) {
     if (page === 1) main.innerHTML = emptyHTML('Could not load', e.message);
   });
@@ -1407,7 +1438,7 @@ function loadAllPlatformsGenre(genreId, typeFilter, page) {
   page = page || 1;
   browseCurrentGenre    = genreId;
   browseCurrentType     = typeFilter;
-  browseCurrentPlatform = 'all';
+  browseCurrentPlatform = [];
 
   var main = document.getElementById('main');
   var pids = PLATFORMS.filter(function(p) { return p.id !== 'all'; }).map(function(p) { return p.id; });
@@ -2346,7 +2377,7 @@ function setLangOption(el, val, label) {
 }
 
 function applyFilters() {
-  if (browseCurrentPlatform !== 'all') {
+  if (browseCurrentPlatform.length > 0) {
     loadPlatformBrowse(browseCurrentPlatform, 1);
   } else if (browseCurrentGenre) {
     loadAllPlatformsGenre(browseCurrentGenre, browseCurrentType, 1);
@@ -2392,7 +2423,7 @@ function handleSearch(e) {
   clearTimeout(searchTimer);
   if (!q) {
     buildGenreBar();
-    if (activePlatform !== 'all') loadPlatformBrowse(activePlatform);
+    if (activePlatform.length > 0) loadPlatformBrowse(activePlatform);
     else if (activeGenre) loadAllPlatformsGenre(activeGenre, currentType);
     else loadHome();
     return;
@@ -2405,7 +2436,7 @@ function clearSearch() {
   searchQuery = '';
   document.getElementById('searchClear').classList.remove('vis');
   buildGenreBar();
-  if (activePlatform !== 'all') loadPlatformBrowse(activePlatform);
+  if (activePlatform.length > 0) loadPlatformBrowse(activePlatform);
   else if (activeGenre) loadAllPlatformsGenre(activeGenre, currentType);
   else loadHome();
 }
