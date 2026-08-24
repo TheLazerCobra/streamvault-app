@@ -130,20 +130,23 @@ var browseLoadingMore   = false;
 function init() {
   supabase.auth.onAuthStateChange(function(event, session) {
     currentAccessToken = session ? session.access_token : null;
+    if (event === 'PASSWORD_RECOVERY') {
+      // A valid session exists at this point (from the emailed reset link),
+      // but we still want them to actually set a new password before
+      // dropping them into the app — don't auto-start on this event.
+      showResetPasswordForm();
+      return;
+    }
     if (session && !appStarted) {
       appStarted = true;
-      loadProfileFromCloud().then(function() {
-        document.getElementById('authGate').style.display = 'none';
-        buildPlatformBar();
-        buildGenreBar();
-        loadHome();
-      });
+      startApp();
     } else if (!session) {
       appStarted = false;
       currentUserId = null;
       profile = { name: 'My Profile' };
       watched = {};
       lists = {};
+      showSignInForm();
       document.getElementById('authGate').style.display = 'flex';
     }
     // Any other combination (e.g. a background TOKEN_REFRESHED while the
@@ -164,12 +167,104 @@ function init() {
 }
 
 // AUTH
+function startApp() {
+  loadProfileFromCloud().then(function() {
+    document.getElementById('authGate').style.display = 'none';
+    buildPlatformBar();
+    buildGenreBar();
+    loadHome();
+  });
+}
+
+// The auth gate has three views sharing one card: the normal sign
+// in/up form, "forgot password" (request a reset email), and "reset
+// password" (set a new one, landed on from the emailed link).
+function showSignInForm() {
+  document.getElementById('authFormView').style.display = '';
+  document.getElementById('forgotFormView').style.display = 'none';
+  document.getElementById('resetFormView').style.display = 'none';
+}
+
+function showForgotPassword() {
+  document.getElementById('authFormView').style.display = 'none';
+  document.getElementById('resetFormView').style.display = 'none';
+  document.getElementById('forgotFormView').style.display = '';
+  document.getElementById('forgotEmail').value = document.getElementById('authEmail').value || '';
+  var errEl = document.getElementById('forgotError');
+  errEl.style.color = '';
+  errEl.textContent = '';
+}
+
+function showResetPasswordForm() {
+  document.getElementById('authFormView').style.display = 'none';
+  document.getElementById('forgotFormView').style.display = 'none';
+  document.getElementById('resetFormView').style.display = '';
+  document.getElementById('resetPassword').value = '';
+  document.getElementById('resetPasswordConfirm').value = '';
+  document.getElementById('resetError').textContent = '';
+  document.getElementById('authGate').style.display = 'flex';
+}
+
+function submitForgotPassword() {
+  var email = document.getElementById('forgotEmail').value.trim();
+  var errEl = document.getElementById('forgotError');
+  var btn   = document.getElementById('forgotBtn');
+  errEl.style.color = '';
+  if (!email) { errEl.textContent = 'Enter your email.'; return; }
+
+  errEl.textContent = '';
+  btn.disabled = true;
+  btn.textContent = 'Sending\u2026';
+
+  var redirectTo = window.location.origin + window.location.pathname;
+  supabase.auth.resetPasswordForEmail(email, { redirectTo: redirectTo }).then(function(res) {
+    btn.disabled = false;
+    btn.textContent = 'Send Reset Link';
+    if (res.error) { errEl.textContent = res.error.message; return; }
+    errEl.style.color = 'var(--gold)';
+    errEl.textContent = 'Check your email for a reset link.';
+  }).catch(function(e) {
+    btn.disabled = false;
+    btn.textContent = 'Send Reset Link';
+    errEl.textContent = 'Could not connect: ' + e.message;
+  });
+}
+
+function submitPasswordReset() {
+  var pw    = document.getElementById('resetPassword').value;
+  var pw2   = document.getElementById('resetPasswordConfirm').value;
+  var errEl = document.getElementById('resetError');
+  var btn   = document.getElementById('resetBtn');
+  errEl.textContent = '';
+  if (!pw || pw.length < 6) { errEl.textContent = 'Password must be at least 6 characters.'; return; }
+  if (pw !== pw2) { errEl.textContent = 'Passwords do not match.'; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Saving\u2026';
+  supabase.auth.updateUser({ password: pw }).then(function(res) {
+    if (res.error) {
+      errEl.textContent = res.error.message;
+      btn.disabled = false;
+      btn.textContent = 'Set New Password';
+      return;
+    }
+    showToast('Password updated');
+    appStarted = true;
+    startApp();
+  }).catch(function(e) {
+    errEl.textContent = 'Could not connect: ' + e.message;
+    btn.disabled = false;
+    btn.textContent = 'Set New Password';
+  });
+}
+
 function toggleAuthMode() {
   authMode = (authMode === 'signin') ? 'signup' : 'signin';
   document.getElementById('authBtn').textContent = (authMode === 'signin') ? 'Sign In' : 'Sign Up';
   document.getElementById('authToggle').innerHTML = (authMode === 'signin')
     ? 'Don\u2019t have an account? <a href="#" onclick="toggleAuthMode();return false;">Sign up</a>'
     : 'Already have an account? <a href="#" onclick="toggleAuthMode();return false;">Sign in</a>';
+  document.getElementById('forgotPasswordLink').style.display = (authMode === 'signin') ? '' : 'none';
   var errEl = document.getElementById('authError');
   errEl.style.color = '';
   errEl.textContent = '';
@@ -3082,10 +3177,14 @@ window.setRatingStar = setRatingStar;
 window.setSortOption = setSortOption;
 window.setType = setType;
 window.setVotesOption = setVotesOption;
+window.showForgotPassword = showForgotPassword;
 window.showListsOverview = showListsOverview;
+window.showSignInForm = showSignInForm;
 window.signOutUser = signOutUser;
 window.submitAuth = submitAuth;
+window.submitForgotPassword = submitForgotPassword;
 window.submitInviteCollaborator = submitInviteCollaborator;
+window.submitPasswordReset = submitPasswordReset;
 window.submitRemoveCollaborator = submitRemoveCollaborator;
 window.submitUpdateCollaboratorRole = submitUpdateCollaboratorRole;
 window.switchProfileTab = switchProfileTab;

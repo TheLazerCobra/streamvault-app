@@ -21,17 +21,46 @@
   <div class="key-card">
     <div class="key-logo">Stream<em>Vault</em></div>
     <div class="key-tagline">Browse Netflix, Disney+, Prime, Peacock, Hulu, Apple TV+, Max &amp; Paramount+ — all in one place. Sign in to save lists and sync across devices.</div>
-    <div class="key-row">
-      <input type="email" class="key-input" id="authEmail" placeholder="Email" autocomplete="email">
+
+    <div id="authFormView">
+      <div class="key-row">
+        <input type="email" class="key-input" id="authEmail" placeholder="Email" autocomplete="email">
+      </div>
+      <div class="key-row" style="margin-top:10px">
+        <input type="password" class="key-input" id="authPassword" placeholder="Password" autocomplete="current-password">
+      </div>
+      <div class="key-row" style="margin-top:16px">
+        <button class="key-btn" id="authBtn" onclick="submitAuth()" style="flex:1">Sign In</button>
+      </div>
+      <div class="key-error" id="authError"></div>
+      <div class="auth-toggle" id="authToggle">Don't have an account? <a href="#" onclick="toggleAuthMode();return false;">Sign up</a></div>
+      <div class="auth-toggle" id="forgotPasswordLink"><a href="#" onclick="showForgotPassword();return false;">Forgot password?</a></div>
     </div>
-    <div class="key-row" style="margin-top:10px">
-      <input type="password" class="key-input" id="authPassword" placeholder="Password" autocomplete="current-password">
+
+    <div id="forgotFormView" style="display:none">
+      <div class="key-row">
+        <input type="email" class="key-input" id="forgotEmail" placeholder="Email" autocomplete="email">
+      </div>
+      <div class="key-row" style="margin-top:16px">
+        <button class="key-btn" id="forgotBtn" onclick="submitForgotPassword()" style="flex:1">Send Reset Link</button>
+      </div>
+      <div class="key-error" id="forgotError"></div>
+      <div class="auth-toggle"><a href="#" onclick="showSignInForm();return false;">&larr; Back to sign in</a></div>
     </div>
-    <div class="key-row" style="margin-top:16px">
-      <button class="key-btn" id="authBtn" onclick="submitAuth()" style="flex:1">Sign In</button>
+
+    <div id="resetFormView" style="display:none">
+      <div class="key-tagline" style="margin-bottom:20px">Enter a new password for your account.</div>
+      <div class="key-row">
+        <input type="password" class="key-input" id="resetPassword" placeholder="New password" autocomplete="new-password">
+      </div>
+      <div class="key-row" style="margin-top:10px">
+        <input type="password" class="key-input" id="resetPasswordConfirm" placeholder="Confirm new password" autocomplete="new-password">
+      </div>
+      <div class="key-row" style="margin-top:16px">
+        <button class="key-btn" id="resetBtn" onclick="submitPasswordReset()" style="flex:1">Set New Password</button>
+      </div>
+      <div class="key-error" id="resetError"></div>
     </div>
-    <div class="key-error" id="authError"></div>
-    <div class="auth-toggle" id="authToggle">Don't have an account? <a href="#" onclick="toggleAuthMode();return false;">Sign up</a></div>
   </div>
 </div>
 
