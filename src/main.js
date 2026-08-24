@@ -1,6 +1,15 @@
 import './styles/main.css';
 import { supabase, supabaseUrl, supabaseAnonKey } from './api/supabase.js';
 
+// A password-reset link redirects back here with `type=recovery` in the
+// URL (hash for the implicit auth flow, query string for PKCE). Captured
+// up front, before Supabase's client processes and strips it: relying on
+// the SDK's PASSWORD_RECOVERY event name alone isn't reliable across flow
+// types — with PKCE it commonly fires a plain SIGNED_IN instead, which
+// would otherwise drop the user straight into the app instead of letting
+// them set a new password.
+var isRecoveryLink = /[?&#]type=recovery(&|$)/.test(window.location.href);
+
 var TMDB_PROXY = supabaseUrl + '/functions/v1/tmdb-proxy';
 var IMGW    = 'https://image.tmdb.org/t/p/w500';
 var IMGBIG  = 'https://image.tmdb.org/t/p/w1280';
@@ -130,10 +139,11 @@ var browseLoadingMore   = false;
 function init() {
   supabase.auth.onAuthStateChange(function(event, session) {
     currentAccessToken = session ? session.access_token : null;
-    if (event === 'PASSWORD_RECOVERY') {
+    if (session && (event === 'PASSWORD_RECOVERY' || isRecoveryLink)) {
       // A valid session exists at this point (from the emailed reset link),
       // but we still want them to actually set a new password before
       // dropping them into the app — don't auto-start on this event.
+      isRecoveryLink = false; // consume it so a later refresh doesn't re-trigger this
       showResetPasswordForm();
       return;
     }
