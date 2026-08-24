@@ -163,6 +163,28 @@
   </div>
 </div>
 
+<!-- COLLABORATORS MODAL (share a list) -->
+<div class="list-edit-modal" id="collabModal" onclick="if(event.target===this)closeCollabModal()">
+  <div class="list-edit-box">
+    <div class="list-edit-title">Share List</div>
+    <div class="list-edit-label">Invite by username</div>
+    <div class="collab-invite-row">
+      <input type="text" class="list-edit-input" id="collabUsername" placeholder="username" style="margin-bottom:0">
+      <select class="pf-select" id="collabRole">
+        <option value="viewer">Can view</option>
+        <option value="editor">Can edit</option>
+      </select>
+    </div>
+    <button class="list-edit-save" onclick="submitInviteCollaborator()" style="width:100%;margin-top:10px">Invite</button>
+    <div class="key-error" id="collabError"></div>
+    <div class="list-edit-label" style="margin-top:22px">People with access</div>
+    <div id="collabList"></div>
+    <div class="list-edit-actions" style="margin-top:16px">
+      <button class="list-edit-cancel" onclick="closeCollabModal()">Done</button>
+    </div>
+  </div>
+</div>
+
 <!-- RATING MODAL -->
 <div class="rating-modal" id="ratingModal" onclick="if(event.target===this)closeRatingModal()">
   <div class="rating-box">

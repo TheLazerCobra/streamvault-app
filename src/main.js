@@ -871,6 +871,16 @@ function dbToListItem(row) {
   };
 }
 
+var LIST_ITEM_COLUMNS = 'tmdb_id,media_type,title,poster_path,year,seasons,genre_ids,tmdb_score,added_at';
+
+function itemsFromRows(rows) {
+  var items = {};
+  (rows || []).forEach(function(li) {
+    items[getItemKey(li.tmdb_id, li.media_type)] = dbToListItem(li);
+  });
+  return items;
+}
+
 // Called once, right after sign-in — replaces the placeholder in-memory
 // state with the signed-in user's real data from Postgres.
 function loadProfileFromCloud() {
@@ -880,25 +890,27 @@ function loadProfileFromCloud() {
     currentUserId = user.id;
     return Promise.all([
       supabase.from('profiles').select('display_name').eq('id', user.id).maybeSingle(),
-      supabase.from('lists').select('id,name,color,list_items(tmdb_id,media_type,title,poster_path,year,seasons,genre_ids,tmdb_score,added_at)').eq('owner_id', user.id),
+      supabase.from('lists').select('id,name,color,owner_id,list_items(' + LIST_ITEM_COLUMNS + ')').eq('owner_id', user.id),
+      supabase.from('list_collaborators').select('role,list:lists(id,name,color,owner_id,list_items(' + LIST_ITEM_COLUMNS + '))').eq('user_id', user.id),
       supabase.from('watched').select('tmdb_id,media_type,title,poster_path,year,seasons,genre_ids,tmdb_score,rating,note,watched_at').eq('user_id', user.id),
     ]);
   }).then(function(results) {
     if (!results) return;
-    var profileRes = results[0], listsRes = results[1], watchedRes = results[2];
-    if (profileRes.error || listsRes.error || watchedRes.error) {
-      throw (profileRes.error || listsRes.error || watchedRes.error);
+    var profileRes = results[0], listsRes = results[1], collabRes = results[2], watchedRes = results[3];
+    if (profileRes.error || listsRes.error || collabRes.error || watchedRes.error) {
+      throw (profileRes.error || listsRes.error || collabRes.error || watchedRes.error);
     }
 
     profile.name = (profileRes.data && profileRes.data.display_name) || 'My Profile';
 
     lists = {};
     (listsRes.data || []).forEach(function(l) {
-      var items = {};
-      (l.list_items || []).forEach(function(li) {
-        items[getItemKey(li.tmdb_id, li.media_type)] = dbToListItem(li);
-      });
-      lists[l.id] = { id: l.id, name: l.name, color: l.color, items: items };
+      lists[l.id] = { id: l.id, name: l.name, color: l.color, ownerId: l.owner_id, role: 'owner', items: itemsFromRows(l.list_items) };
+    });
+    (collabRes.data || []).forEach(function(row) {
+      var l = row.list;
+      if (!l) return;
+      lists[l.id] = { id: l.id, name: l.name, color: l.color, ownerId: l.owner_id, role: row.role, items: itemsFromRows(l.list_items) };
     });
 
     watched = {};
@@ -943,7 +955,7 @@ function makeListItem(item, type) {
 // ── List CRUD ─────────────────────────────────────────────────────────────────────
 function createList(name, color) {
   var id = crypto.randomUUID();
-  var row = {id:id, name:name || 'New List', color:color || LIST_COLORS[0], items:{}};
+  var row = {id:id, name:name || 'New List', color:color || LIST_COLORS[0], ownerId: currentUserId, role: 'owner', items:{}};
   lists[id] = row;
 
   pendingListCreates[id] = supabase.from('lists').insert({
@@ -1049,6 +1061,60 @@ function listCountForItem(id, type) {
   return Object.values(lists).filter(function(l) { return !!l.items[key]; }).length;
 }
 
+// ── Collaborators ─────────────────────────────────────────────────────────────
+// role is 'owner' | 'editor' | 'viewer' — set on each list object by
+// loadProfileFromCloud/createList. Only owner/editor may modify a list;
+// RLS enforces this server-side regardless of what the UI shows, so a
+// missed check here is a UX gap, not a security hole.
+function isListEditable(listId) {
+  var l = lists[listId];
+  return !!l && (l.role === 'owner' || l.role === 'editor');
+}
+function isListOwned(listId) {
+  var l = lists[listId];
+  return !!l && l.role === 'owner';
+}
+
+function loadListCollaborators(listId) {
+  return supabase.from('list_collaborators')
+    .select('user_id,role,profiles(username)')
+    .eq('list_id', listId)
+    .then(function(res) {
+      if (res.error) throw res.error;
+      return (res.data || []).map(function(row) {
+        return { userId: row.user_id, role: row.role, username: row.profiles ? row.profiles.username : '(unknown)' };
+      });
+    });
+}
+
+function inviteCollaborator(listId, username, role) {
+  username = (username || '').trim();
+  if (!username) return Promise.reject(new Error('Enter a username.'));
+  return supabase.from('profiles').select('id').ilike('username', username).maybeSingle().then(function(res) {
+    if (res.error) throw res.error;
+    if (!res.data) throw new Error('No user found with that username.');
+    if (res.data.id === currentUserId) throw new Error("You can't invite yourself.");
+    return supabase.from('list_collaborators').insert({ list_id: listId, user_id: res.data.id, role: role });
+  }).then(function(res) {
+    if (res.error) {
+      if (res.error.code === '23505') throw new Error('Already invited to this list.');
+      throw res.error;
+    }
+  });
+}
+
+function removeCollaborator(listId, userId) {
+  return supabase.from('list_collaborators').delete().eq('list_id', listId).eq('user_id', userId).then(function(res) {
+    if (res.error) throw res.error;
+  });
+}
+
+function updateCollaboratorRole(listId, userId, role) {
+  return supabase.from('list_collaborators').update({ role: role }).eq('list_id', listId).eq('user_id', userId).then(function(res) {
+    if (res.error) throw res.error;
+  });
+}
+
 // ── Watched ───────────────────────────────────────────────────────────────────
 function addToWatched(item, type, rating, note) {
   if (isInAnyList(item.id, type)) removeFromAllLists(item.id, type);
@@ -1110,7 +1176,7 @@ function renderListPickerItems() {
   var key = getItemKey(pendingPickerItem.id, pendingPickerItem.type);
   var container = document.getElementById('listPickerItems');
   var html = '';
-  Object.values(lists).forEach(function(lst) {
+  Object.values(lists).filter(function(lst) { return lst.role === 'owner' || lst.role === 'editor'; }).forEach(function(lst) {
     var inList = !!lst.items[key];
     html += '<div class="list-picker-item' + (inList ? ' in-list' : '') + '" onclick="toggleListMembership(\'' + lst.id + '\')">'
       + '<div class="list-picker-dot" style="background:' + lst.color + '"></div>'
@@ -1191,6 +1257,83 @@ function saveListEdit() {
     renderListPickerItems();
   }
   refreshProfileIfOpen();
+}
+
+// ── Collaborators modal ───────────────────────────────────────────────────────
+var pendingCollabListId = null;
+
+function openCollabModal(listId) {
+  if (!isListOwned(listId)) return;
+  pendingCollabListId = listId;
+  document.getElementById('collabUsername').value = '';
+  document.getElementById('collabError').textContent = '';
+  document.getElementById('collabList').innerHTML = '<div class="collab-empty">Loading…</div>';
+  document.getElementById('collabModal').classList.add('open');
+  renderCollabList();
+}
+
+function closeCollabModal() {
+  document.getElementById('collabModal').classList.remove('open');
+  pendingCollabListId = null;
+}
+
+function renderCollabList() {
+  var listId = pendingCollabListId;
+  if (!listId) return;
+  loadListCollaborators(listId).then(function(collabs) {
+    if (pendingCollabListId !== listId) return; // modal moved on while this was in flight
+    var container = document.getElementById('collabList');
+    if (!collabs.length) {
+      container.innerHTML = '<div class="collab-empty">No one else has access yet.</div>';
+      return;
+    }
+    container.innerHTML = collabs.map(function(c) {
+      return '<div class="collab-row">'
+        + '<span class="collab-username">@' + esc(c.username) + '</span>'
+        + '<select class="pf-select" onchange="submitUpdateCollaboratorRole(\'' + c.userId + '\',this.value)">'
+        + '<option value="viewer"' + (c.role === 'viewer' ? ' selected' : '') + '>Can view</option>'
+        + '<option value="editor"' + (c.role === 'editor' ? ' selected' : '') + '>Can edit</option>'
+        + '</select>'
+        + '<button class="collab-remove-btn" onclick="submitRemoveCollaborator(\'' + c.userId + '\')" title="Remove access">✕</button>'
+        + '</div>';
+    }).join('');
+  }).catch(function(e) {
+    document.getElementById('collabList').innerHTML = '<div class="key-error">Could not load: ' + esc(e.message) + '</div>';
+  });
+}
+
+function submitInviteCollaborator() {
+  if (!pendingCollabListId) return;
+  var username = document.getElementById('collabUsername').value;
+  var role     = document.getElementById('collabRole').value;
+  var errEl    = document.getElementById('collabError');
+  errEl.textContent = '';
+  inviteCollaborator(pendingCollabListId, username, role).then(function() {
+    document.getElementById('collabUsername').value = '';
+    renderCollabList();
+    showToast('Invited @' + username.trim());
+  }).catch(function(e) {
+    errEl.textContent = e.message;
+  });
+}
+
+function submitRemoveCollaborator(userId) {
+  if (!pendingCollabListId) return;
+  removeCollaborator(pendingCollabListId, userId).then(function() {
+    renderCollabList();
+  }).catch(function(e) {
+    showToast('Could not remove: ' + e.message);
+  });
+}
+
+function submitUpdateCollaboratorRole(userId, role) {
+  if (!pendingCollabListId) return;
+  updateCollaboratorRole(pendingCollabListId, userId, role).then(function() {
+    showToast('Updated access');
+  }).catch(function(e) {
+    showToast('Could not update: ' + e.message);
+    renderCollabList(); // revert the select back to its real value
+  });
 }
 
 // ── Profile header & navigation ───────────────────────────────────────────────
@@ -1359,13 +1502,18 @@ function renderListsOverview() {
   html += '<div class="lists-grid">';
   listArr.forEach(function(lst) {
     var count = Object.keys(lst.items).length;
+    var roleBadge = lst.role === 'owner' ? ''
+      : '<span class="list-role-badge">' + (lst.role === 'editor' ? 'Can edit' : 'Shared with you') + '</span>';
+    var actions = lst.role === 'owner'
+      ? '<button class="list-action-btn" onclick="openNewListModal(\'' + lst.id + '\',false)">&#9998; Rename</button>'
+        + '<button class="list-action-btn" onclick="openCollabModal(\'' + lst.id + '\')">&#128101; Share</button>'
+        + '<button class="list-action-btn danger" onclick="confirmDeleteList(\'' + lst.id + '\')">&#10005; Delete</button>'
+      : '';
     html += '<div class="list-card" style="--list-color:' + lst.color + '" onclick="openList(\'' + lst.id + '\')">'
-      + '<div class="list-card-name">' + esc(lst.name) + '</div>'
+      + '<div class="list-card-name">' + esc(lst.name) + roleBadge + '</div>'
       + '<div class="list-card-count">' + count + ' title' + (count === 1 ? '' : 's') + '</div>'
-      + '<div class="list-card-actions" onclick="event.stopPropagation()">'
-      + '<button class="list-action-btn" onclick="openNewListModal(\'' + lst.id + '\',false)">&#9998; Rename</button>'
-      + '<button class="list-action-btn danger" onclick="confirmDeleteList(\'' + lst.id + '\')">&#10005; Delete</button>'
-      + '</div></div>';
+      + (actions ? '<div class="list-card-actions" onclick="event.stopPropagation()">' + actions + '</div>' : '')
+      + '</div>';
   });
   html += '</div>';
   container.innerHTML = html;
@@ -2902,6 +3050,7 @@ init();
 window.applyProfileFilters = applyProfileFilters;
 window.applyYearFilter = applyYearFilter;
 window.clearSearch = clearSearch;
+window.closeCollabModal = closeCollabModal;
 window.closeListEditModal = closeListEditModal;
 window.closeListPicker = closeListPicker;
 window.closeModal = closeModal;
@@ -2912,6 +3061,7 @@ window.editProfileName = editProfileName;
 window.goHome = goHome;
 window.handleWatchedClick = handleWatchedClick;
 window.handleWatchlistClick = handleWatchlistClick;
+window.openCollabModal = openCollabModal;
 window.openDetail = openDetail;
 window.openList = openList;
 window.openNewListModal = openNewListModal;
@@ -2935,6 +3085,9 @@ window.setVotesOption = setVotesOption;
 window.showListsOverview = showListsOverview;
 window.signOutUser = signOutUser;
 window.submitAuth = submitAuth;
+window.submitInviteCollaborator = submitInviteCollaborator;
+window.submitRemoveCollaborator = submitRemoveCollaborator;
+window.submitUpdateCollaboratorRole = submitUpdateCollaboratorRole;
 window.switchProfileTab = switchProfileTab;
 window.switchTab = switchTab;
 window.toggleAuthMode = toggleAuthMode;
